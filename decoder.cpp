@@ -30,22 +30,22 @@ void * open_decoder(void)
     }
 
     WelsTraceCallback cb = openh264_log;
-    int32_t tracelevel = 3;//0x7fffffff;
+    // int32_t tracelevel = 2;//0x7fffffff;
     if ( decoder_->SetOption(DECODER_OPTION_TRACE_CALLBACK, (void*)&cb) )
     {
         emscripten_log(EM_LOG_CONSOLE, "SetOption failed\n");
     }
-    if ( decoder_->SetOption(DECODER_OPTION_TRACE_LEVEL, &tracelevel) )
-    {
-        emscripten_log(EM_LOG_CONSOLE, "SetOption failed\n");
-    }
+    // if ( decoder_->SetOption(DECODER_OPTION_TRACE_LEVEL, &tracelevel) )
+    // {
+    //     emscripten_log(EM_LOG_CONSOLE, "SetOption failed\n");
+    // }
 
-    SDecodingParam decParam;
-    memset (&decParam, 0, sizeof (SDecodingParam));
-    decParam.eOutputColorFormat  = videoFormatI420;
-    decParam.uiTargetDqLayer = UCHAR_MAX;
-    decParam.eEcActiveIdc = ERROR_CON_SLICE_COPY;
+    SDecodingParam decParam = {0};
     decParam.sVideoProperty.eVideoBsType = VIDEO_BITSTREAM_DEFAULT;
+
+    // decParam.eOutputColorFormat  = videoFormatI420;
+    // decParam.uiTargetDqLayer = UCHAR_MAX;
+    // decParam.eEcActiveIdc = ERROR_CON_SLICE_COPY;
 
     if ( decoder_->Initialize (&decParam) ) {
         emscripten_log(EM_LOG_CONSOLE, "initialize failed\n");
@@ -54,6 +54,7 @@ void * open_decoder(void)
 
     return decoder_;
 }
+
 
 extern "C"
 void close_decoder(void * dec)
@@ -65,14 +66,48 @@ void close_decoder(void * dec)
     }
 }
 
+static char buf[256*1024] = { 0, 0, 0, 1 };
+
+
 extern "C"
-int decode_nal(void * dec, unsigned char const * nal, size_t nalsz)
+void on_frame_decoded(uint8_t frameData[], uint8_t* data[], int width, int height, int stride1, int stride2) {
+
+  int y;
+  for (y=0; y < height; y++) {
+    memcpy(frameData + y * width, data[0] + y * stride1, width);
+    // const ar = this.module.HEAP8.subarray(a + y*stride1, a+y*stride1+width);
+    // data.set(ar, y * width);
+  }
+
+  int cbofs = width * height;
+  for (y=0; y < height/2; y++) {
+    memcpy(frameData + cbofs + y * width/2, data[1] + y * stride2, width/2);
+    // const ar = this.module.HEAP8.subarray(b + y*stride2, b+y*stride2+width/2);
+    // data.set(ar, cbofs + y * width/2);
+  }
+
+  int crofs=cbofs + width*height/4;
+  for (y=0; y < height/2; y++) {
+    memcpy(frameData + crofs + y * width/2, data[2] + y * stride2, width/2);
+    // const ar = this.module.HEAP8.subarray(c + y*stride2, c+y*stride2+width/2);
+    // data.set(ar, crofs + y * width/2);
+  }
+
+
+}
+
+
+extern "C"
+int decode_nal(int id, void * dec, unsigned char const * nal, size_t nalsz)
 {
     ISVCDecoder* decoder_ = (ISVCDecoder*)dec;
     uint8_t* data[3];
     SBufferInfo bufInfo;
     memset (data, 0, sizeof (data));
     memset (&bufInfo, 0, sizeof (SBufferInfo));
+
+    memcpy(buf + 4, nal, nalsz);
+
     if (nalsz <= 0) {
         int32_t iEndOfStreamFlag = 1;
         decoder_->SetOption (DECODER_OPTION_END_OF_STREAM, &iEndOfStreamFlag);
@@ -81,22 +116,48 @@ int decode_nal(void * dec, unsigned char const * nal, size_t nalsz)
     }
 
 
-    DECODING_STATE rv = decoder_->DecodeFrame2 (nal, (int) nalsz, data, &bufInfo);
-    if (rv == 0 && bufInfo.iBufferStatus) {
+    DECODING_STATE rv = decoder_->DecodeFrameNoDelay((unsigned char *)buf, (int) (nalsz + 4), data, &bufInfo);
+    if (rv == 0 && bufInfo.iBufferStatus == 1) {
+        
+
+            int width = bufInfo.UsrData.sSystemBuffer.iWidth;
+            int height = bufInfo.UsrData.sSystemBuffer.iHeight;
+
+          int len = width * height * 3/2;
+          uint8_t frameData[len];
+
+          on_frame_decoded(frameData, data, 
+            width, 
+            height, 
+            bufInfo.UsrData.sSystemBuffer.iStride[0], 
+            bufInfo.UsrData.sSystemBuffer.iStride[1]);
+
+
         EM_ASM_({
-            frame_callback($0, $1, $2, $3, $4, $5, $6);
+            frame_callback($0, $1, $2, $3);
         },
-            data[0],
-            data[1],
-            data[2],
-            bufInfo.UsrData.sSystemBuffer.iWidth,
-            bufInfo.UsrData.sSystemBuffer.iHeight,
-            bufInfo.UsrData.sSystemBuffer.iStride[0],
-            bufInfo.UsrData.sSystemBuffer.iStride[1]
+            id,
+            frameData,
+            width,
+            height
         );
+
+        // EM_ASM_({
+        //     frame_callback($0, $1, $2, $3, $4, $5, $6, $7);
+        // },
+        //     id,
+        //     data[0],
+        //     data[1],
+        //     data[2],
+        //     bufInfo.UsrData.sSystemBuffer.iWidth,
+        //     bufInfo.UsrData.sSystemBuffer.iHeight,
+        //     bufInfo.UsrData.sSystemBuffer.iStride[0],
+        //     bufInfo.UsrData.sSystemBuffer.iStride[1]
+        // );
+
+
         return 1;
-    }
-    else if (rv != 0) {
+    } else if (rv != 0) {
         char statusstr[100] = {0};
         if (rv & dsFramePending) strcat(statusstr,",FramePending");
         if (rv & dsRefLost) strcat(statusstr,",RefLost");
@@ -110,8 +171,9 @@ int decode_nal(void * dec, unsigned char const * nal, size_t nalsz)
         if (rv & dsDstBufNeedExpan) strcat(statusstr,",DstBufNeedExpan");
         emscripten_log(EM_LOG_CONSOLE, "Decode failed: %#x - %s\n", rv, statusstr);
         return -1;
-    } else
+    } else {
         return 0;
+    }
 
 //     emscripten_log(EM_LOG_CONSOLE, " frame ready:%d\n"
 //            " BsTimeStamp:%llu\n"
@@ -130,52 +192,6 @@ int decode_nal(void * dec, unsigned char const * nal, size_t nalsz)
 //             ,bufInfo.UsrData.sSystemBuffer.iStride[1]
 //           );
 }
-
-ssize_t getnal(unsigned char const * mmaped, size_t offs, size_t sz)
-{
-    size_t ofs = offs+3;
-    int zerocnt = 0;
-
-    if (offs >= sz) return -1;
-
-    for(;ofs<sz;ofs++) {
-        switch (mmaped[ofs]) {
-            case 0:
-                zerocnt++;
-                break;
-            case 1:
-                if (zerocnt == 3)
-                    return ofs - offs - 4 + 1;
-            default:
-                zerocnt = 0;
-        }
-    }
-    return ofs - offs;
-}
-
-extern "C"
-int decode_h264buffer(void * h, unsigned char const * nalbuf, size_t sz)
-{
-    size_t ofs = 0;
-    ssize_t nalsz;
-
-    int framecnt = -2;
-
-    do {
-        nalsz = getnal(nalbuf, ofs, sz);
-        const unsigned char * nal = nalbuf + ofs;
-
-        decode_nal(h, nal, nalsz);
-
-        framecnt++;
-
-        ofs += nalsz;
-    } while (nalsz>0);
-
-
-    return 0;
-}
-
 
 #ifdef NATIVE
 #include <sys/mman.h>
@@ -203,7 +219,7 @@ int main(int argc, char * argv[])
         nalsz = getnal(nalbuf, ofs, sz);
         const unsigned char * nal = nalbuf + ofs;
 
-        decode_nal(h, nal, nalsz);
+        decode_nal(0, h, nal, nalsz);
 
         ofs += nalsz;
     } while (nalsz>0);
