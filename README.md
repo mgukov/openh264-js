@@ -18,24 +18,18 @@ OpenH264 (http://www.openh264.org/)  does support cabac.
  - &gt; 30 fps for 1280x720 main profile stream (cabac encoded) on Haswell i7
 
 ## Limitiations
- - Lot's of hardcoding in demo (decode.html).
+ - Lot's of hardcoding in demo.
 
 ## Build instructions
- * only tested on linux / emcc (Emscripten GCC-like replacement) 1.29.0 (commit fdf24b478e1b26c0362a1627aca49ef82fd53f6a)
  * Get emscripten (http://kripken.github.io/emscripten-site/docs/getting_started/Tutorial.html)
- 
-* Run make
+ * Run make
 
 The Makefile will download all dependencies and build everything.
-A small demo is provided in decoder.html. The demo uses Broadway's rendering library.
-
 
 ## Possible improvements
 
 There are a lot of copying going on, Several reasons:
-
  * A quick look didn't reveal any buffer control in OpenH264 (validity of data pointers are until next decode call?)
- * Broadway's yuv-&gt;rgb conversion needs back-to-back planes with stride = width: OpenH264 doesn't do that.
 
 ## Other points
  * closure-compiler, even with at whitespace level makes playback slower and more jittery. No clue why.
